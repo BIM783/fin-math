@@ -1,0 +1,348 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
+def build_binomial_tree(S0, T, R_list, u_list, d_list, K, opt_type='call'):
+    """
+    Построение биномиального дерева для европейского опциона
+    """
+    # Дерево цен акции
+    S_tree = [[0.0]*(i+1) for i in range(T+1)]
+    S_tree[0][0] = S0
+    
+    for i in range(T):
+        for j in range(i+1):
+            S_tree[i+1][j+1] = S_tree[i][j] * u_list[i]  # движение вверх
+            S_tree[i+1][j] = S_tree[i][j] * d_list[i]    # движение вниз
+    
+    # Расчет мартингальных вероятностей
+    q_u = []
+    q_d = []
+    for i in range(T):
+        R = R_list[i]
+        u = u_list[i]
+        d = d_list[i]
+        denom = u - d
+        q_u_i = (1+R - d) / denom
+        q_d_i = (u - (1+R)) / denom
+        q_u.append(q_u_i)
+        q_d.append(q_d_i)
+    
+    # Дерево цен опциона (обратный ход)
+    V_tree = [[0.0]*(i+1) for i in range(T+1)]
+    
+    # Последний уровень (момент исполнения)
+    for j in range(T+1):
+        S_T = S_tree[T][j]
+        if opt_type == 'call':
+            V_tree[T][j] = max(S_T - K, 0.0)
+        else:
+            V_tree[T][j] = max(K - S_T, 0.0)
+    
+    # Деревья для x и y (хеджирующий портфель)
+    x_tree = [[0.0]*(i+1) for i in range(T)]
+    y_tree = [[0.0]*(i+1) for i in range(T)]
+    
+    # Обратный ход от T-1 до 0
+    for i in range(T-1, -1, -1):
+        R = R_list[i]
+        u = u_list[i]
+        d = d_list[i]
+        for j in range(i+1):
+            S = S_tree[i][j]
+            V_up = V_tree[i+1][j+1]
+            V_down = V_tree[i+1][j]
+            denom = u - d
+            
+            # Расчет состава портфеля
+            y = (V_up - V_down) / (S * denom)
+            x = (u * V_down - d * V_up) / ((1+R) * denom)
+            
+            y_tree[i][j] = y
+            x_tree[i][j] = x
+            
+            # Расчет цены опциона
+            V_tree[i][j] = (q_u[i] * V_up + q_d[i] * V_down) / (1+R)
+    
+    return {
+        'S_tree': S_tree,
+        'V_tree': V_tree,
+        'x_tree': x_tree,
+        'y_tree': y_tree,
+        'q_u': q_u,
+        'q_d': q_d,
+        'T': T,
+        'K': K,
+        'opt_type': opt_type,
+        'R_list': R_list,
+        'u_list': u_list,
+        'd_list': d_list
+    }
+
+def print_tree_text(result, value_type='V', precision=4):
+    """Вывод дерева в текстовом виде"""
+    T = result['T']
+    S_tree = result['S_tree']
+    V_tree = result['V_tree']
+    x_tree = result['x_tree']
+    y_tree = result['y_tree']
+    
+    if value_type == 'S':
+        data_tree = S_tree
+        name = "S (цена акции)"
+    elif value_type == 'V':
+        data_tree = V_tree
+        name = "V (цена опциона)"
+    elif value_type == 'x':
+        data_tree = x_tree
+        name = "x (количество облигаций)"
+    elif value_type == 'y':
+        data_tree = y_tree
+        name = "y (количество акций)"
+    else:
+        raise ValueError("value_type должен быть S, V, x или y")
+    
+    print(f"\nДерево {name}:")
+    for i in range(len(data_tree)):
+        values = [f"{val:.{precision}f}" for val in data_tree[i]]
+        print(f"  Шаг {i}: {'   '.join(values)}")
+
+def print_calculations(result, precision=4):
+    """Подробный вывод всех вычислений"""
+    T = result['T']
+    S_tree = result['S_tree']
+    V_tree = result['V_tree']
+    x_tree = result['x_tree']
+    y_tree = result['y_tree']
+    q_u = result['q_u']
+    q_d = result['q_d']
+    R_list = result['R_list']
+    u_list = result['u_list']
+    d_list = result['d_list']
+    
+    print("\n" + "="*80)
+    print("ПРОМЕЖУТОЧНЫЕ ВЫЧИСЛЕНИЯ")
+    print("="*80)
+    
+    print("\n1. МАРТИНГАЛЬНЫЕ ВЕРОЯТНОСТИ (q_u, q_d):")
+    for i in range(T):
+        R = R_list[i]
+        u = u_list[i]
+        d = d_list[i]
+        print(f"\n--- Шаг {i} -> {i+1} (R={R}, u={u}, d={d}) ---")
+        print(f"  q_u = (1+{R} - {d}) / ({u} - {d}) = {q_u[i]:.{precision}f}")
+        print(f"  q_d = 1 - q_u = {q_d[i]:.{precision}f}")
+    
+    print("\n2. ДЕРЕВО ЦЕН АКЦИИ (S):")
+    for i in range(T+1):
+        for j in range(i+1):
+            down = i - j
+            up = j
+            print(f"  Узел ({down},{up}): S = {S_tree[i][j]:.{precision}f}")
+    
+    print("\n3. ПЛАТЕЖИ В МОМЕНТ ИСПОЛНЕНИЯ (T=3):")
+    K = result['K']
+    for j in range(T+1):
+        S_T = S_tree[T][j]
+        V_T = V_tree[T][j]
+        down = T - j
+        up = j
+        print(f"  Узел ({down},{up}): S={S_T:.{precision}f}, V=max(S-{K},0)={V_T:.{precision}f}")
+    
+    print("\n4. ОБРАТНЫЙ ХОД - РАСЧЕТ ЦЕНЫ ОПЦИОНА И ХЕДЖИРУЮЩЕГО ПОРТФЕЛЯ:")
+    for i in range(T-1, -1, -1):
+        R = R_list[i]
+        u = u_list[i]
+        d = d_list[i]
+        print(f"\n--- Шаг {i} (обратный ход) ---")
+        for j in range(i+1):
+            S = S_tree[i][j]
+            V_up = V_tree[i+1][j+1]
+            V_down = V_tree[i+1][j]
+            y = y_tree[i][j]
+            x = x_tree[i][j]
+            V = V_tree[i][j]
+            denom = u - d
+            down = i - j
+            up = j
+            
+            print(f"\n  Узел ({down},{up}) [шаг {i}]: S = {S:.{precision}f}")
+            print(f"    V_up = {V_up:.{precision}f}, V_down = {V_down:.{precision}f}")
+            print(f"    y = (V_up - V_down) / (S * (u-d))")
+            print(f"       = ({V_up:.{precision}f} - {V_down:.{precision}f}) / ({S:.{precision}f} * {denom:.{precision}f}) = {y:.{precision}f}")
+            print(f"    x = (u * V_down - d * V_up) / ((1+R) * (u-d))")
+            print(f"       = ({u}*{V_down:.{precision}f} - {d}*{V_up:.{precision}f}) / ({1+R} * {denom:.{precision}f}) = {x:.{precision}f}")
+            print(f"    V = (q_u * V_up + q_d * V_down) / (1+R)")
+            print(f"       = ({q_u[i]:.{precision}f}*{V_up:.{precision}f} + {q_d[i]:.{precision}f}*{V_down:.{precision}f}) / {1+R} = {V:.{precision}f}")
+    
+    print("\n" + "="*80)
+    print(f"ИТОГОВАЯ ЦЕНА ОПЦИОНА: V(0,0) = {V_tree[0][0]:.{precision}f} руб.")
+    print("="*80)
+
+def draw_tree_full(result, figsize=(16, 10), precision=2, fontsize=8,
+                   x_spacing=2.5, y_spacing=1.5, box_width=1.1, box_height=0.8,
+                   show_coords=True, shrink_points=0):
+    """Визуализация полного биномиального дерева"""
+    T = result['T']
+    S_tree = result['S_tree']
+    V_tree = result['V_tree']
+    x_tree = result['x_tree']
+    y_tree = result['y_tree']
+    
+    # Позиции узлов
+    pos = {}
+    for i in range(T+1):
+        for j in range(i+1):
+            x = i * x_spacing
+            y = (j - i/2) * y_spacing
+            pos[(i, j)] = (x, y)
+    
+    fig, ax = plt.subplots(figsize=figsize)
+    margin = 0.8
+    ax.set_xlim(-margin, T * x_spacing + margin)
+    y_vals = [y for (_, y) in pos.values()]
+    ax.set_ylim(min(y_vals) - margin, max(y_vals) + margin)
+    ax.set_aspect('equal')
+    ax.axis('off')
+    
+    half_w = box_width / 2
+    half_h = box_height / 2
+    
+    def boundary_point(center, direction, half_w, half_h):
+        dx, dy = direction
+        t = float('inf')
+        if abs(dx) > 1e-8:
+            t_x = half_w / abs(dx)
+            t = min(t, t_x)
+        if abs(dy) > 1e-8:
+            t_y = half_h / abs(dy)
+            t = min(t, t_y)
+        return center + t * direction
+    
+    # Рисуем стрелки
+    for i in range(T):
+        for j in range(i+1):
+            from_center = np.array(pos[(i, j)])
+            to_up = np.array(pos[(i+1, j+1)])
+            to_down = np.array(pos[(i+1, j)])
+            for to_center in (to_up, to_down):
+                vec = to_center - from_center
+                if np.linalg.norm(vec) < 1e-8:
+                    continue
+                direction = vec / np.linalg.norm(vec)
+                start = boundary_point(from_center, direction, half_w, half_h)
+                end = boundary_point(to_center, -direction, half_w, half_h)
+                ax.annotate("", xy=(end[0], end[1]), xytext=(start[0], start[1]),
+                            arrowprops=dict(arrowstyle="->", color='black', lw=1.2,
+                                            shrinkA=shrink_points, shrinkB=shrink_points))
+    
+    # Рисуем узлы с данными
+    for i in range(T+1):
+        for j in range(i+1):
+            xc, yc = pos[(i, j)]
+            left = xc - half_w
+            bottom = yc - half_h
+            rect = mpatches.Rectangle((left, bottom), box_width, box_height,
+                                      facecolor='lightcyan', edgecolor='black',
+                                      linewidth=1.5, zorder=2)
+            ax.add_patch(rect)
+            
+            S_val = S_tree[i][j]
+            V_val = V_tree[i][j]
+            if i < T:
+                x_val = x_tree[i][j]
+                y_val = y_tree[i][j]
+                text = (f"S={S_val:.{precision}f}\n"
+                        f"V={V_val:.{precision}f}\n"
+                        f"x={x_val:.{precision}f}\n"
+                        f"y={y_val:.{precision}f}")
+            else:
+                text = (f"S={S_val:.{precision}f}\n"
+                        f"V={V_val:.{precision}f}")
+            ax.text(xc, yc, text, ha='center', va='center',
+                    fontsize=fontsize, zorder=3)
+            
+            if show_coords:
+                down = i - j
+                up = j
+                ax.text(xc, yc + box_height/2 + 0.1, f"({down},{up})",
+                        ha='center', va='bottom', fontsize=fontsize-1,
+                        color='darkblue', fontweight='bold', zorder=3)
+    
+    plt.title(f"Биномиальное дерево (T={T}, K={result['K']}, S0={result['S_tree'][0][0]})", 
+              fontsize=12, fontweight='bold', pad=20)
+    plt.tight_layout()
+    plt.show()
+
+# ============================================================================
+# ПАРАМЕТРЫ ДЛЯ ПЕССИМИСТИЧНОГО СЦЕНАРИЯ (ТАТНЕФТЬ)
+# ============================================================================
+
+T = 3
+S0 = 630.00                    # Начальная цена акции Татнефти (май 2026)
+K = 850.00                     # Страйк опциона (выше, чем в оптимистичном)
+R_list = [0.14, 0.14, 0.14]   # Безрисковые ставки по годам (14% каждый год)
+u_list = [1.1500, 1.1500, 1.1500]  # Множители роста (одинаковые)
+d_list = [0.8500, 0.8200, 0.8000]  # Множители падения (уменьшаются)
+opt_type = 'call'              # Колл-опцион
+
+# Объективные вероятности (для информации)
+p_up = [0.30, 0.25, 0.20]      # Вероятности роста
+p_down = [0.70, 0.75, 0.80]    # Вероятности падения
+
+# Построение дерева
+result = build_binomial_tree(S0, T, R_list, u_list, d_list, K, opt_type)
+
+# Вывод результатов
+print("\n" + "="*80)
+print("БИНОМИАЛЬНАЯ МОДЕЛЬ ЦЕНООБРАЗОВАНИЯ ОПЦИОНА")
+print("ПАО «Татнефть» - ПЕССИМИСТИЧНЫЙ СЦЕНАРИЙ")
+print("="*80)
+print(f"\nПараметры модели:")
+print(f"  Начальная цена акции (S0): {S0} руб.")
+print(f"  Страйк опциона (K): {K} руб.")
+print(f"  Горизонт моделирования (T): {T} года")
+print(f"  Безрисковые ставки: {R_list}")
+print(f"  Множители роста (u): {u_list}")
+print(f"  Множители падения (d): {d_list}")
+print(f"\nОбъективные вероятности:")
+print(f"  Год 1 (2026): p_up = {p_up[0]}, p_down = {p_down[0]}")
+print(f"  Год 2 (2027): p_up = {p_up[1]}, p_down = {p_down[1]}")
+print(f"  Год 3 (2028): p_up = {p_up[2]}, p_down = {p_down[2]}")
+
+# Проверка условия безарбитражности
+print(f"\nПроверка условия безарбитражности (dᵢ ≤ 1+Rᵢ ≤ uᵢ):")
+for i in range(T):
+    R = R_list[i]
+    u = u_list[i]
+    d = d_list[i]
+    check = d <= (1+R) <= u
+    status = "✓" if check else "✗"
+    print(f"  Год {i+1}: {d} ≤ {1+R} ≤ {u} {status}")
+
+# Текстовый вывод деревьев
+print_tree_text(result, value_type='S', precision=2)
+print_tree_text(result, value_type='V', precision=2)
+
+# Подробные вычисления
+print_calculations(result, precision=4)
+
+# Визуализация
+draw_tree_full(result, precision=2, fontsize=9,
+               x_spacing=2.8,
+               y_spacing=1.8,
+               box_width=1.2, 
+               box_height=0.9,
+               show_coords=True,
+               shrink_points=3)
+
+# Итоговая информация
+print("\n" + "="*80)
+print("ИТОГОВЫЕ РЕЗУЛЬТАТЫ")
+print("="*80)
+print(f"\n✅ Справедливая цена европейского колл-опциона: {result['V_tree'][0][0]:.2f} руб.")
+print(f"\n✅ Начальный хеджирующий портфель:")
+print(f"   - Безрисковый актив (x): {result['x_tree'][0][0]:.4f} руб.")
+print(f"   - Акции Татнефти (y): {result['y_tree'][0][0]:.4f} шт.")
+print(f"   - Стоимость портфеля: {result['V_tree'][0][0]:.2f} руб.")
+print("\n" + "="*80)
