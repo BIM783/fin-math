@@ -1,0 +1,314 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import stats
+
+
+
+# Параметры биномиальной модели
+S0 = 630.00                      # Начальная цена акции Татнефти
+K = 750.00                       # Страйк опциона
+T = 3                            # Горизонт моделирования (3 года)
+
+R_list = np.array([0.14, 0.12, 0.105])   # Безрисковые ставки: 14%, 12%, 10.5%
+u_list = np.array([1.2000, 1.2500, 1.3000])  # Множители роста
+d_list = np.array([0.8500, 0.8200, 0.8000])  # Множители падения
+p_u = np.array([0.68, 0.72, 0.75])  # Объективные вероятности роста
+p_d = 1 - p_u                      # Объективные вероятности падения
+
+# Цена опциона из биномиальной модели
+V0 = 121.51                        # Справедливая цена европейского колл-опциона
+
+print("=" * 80)
+print("СТОХАСТИЧЕСКОЕ ДИНАМИЧЕСКОЕ ПРОГРАММИРОВАНИЕ")
+print("Оптимистический сценарий - ПАО «Татнефть»")
+print("=" * 80)
+print(f"\nПараметры модели:")
+print(f"  Начальная цена акции (S₀): {S0} руб.")
+print(f"  Страйк опциона (K): {K} руб.")
+print(f"  Цена опциона (V₀): {V0} руб.")
+print(f"  Горизонт (T): {T} года")
+print(f"  Безрисковые ставки (R): {R_list}")
+print(f"  Множители роста (u): {u_list}")
+print(f"  Множители падения (d): {d_list}")
+print(f"  Объективные вероятности роста (pᵤ): {p_u}")
+
+# ============================================================================
+# РАСЧЕТ ПАРАМЕТРОВ ДЛЯ ДИНАМИЧЕСКОГО ПРОГРАММИРОВАНИЯ
+# ============================================================================
+
+# Ожидаемая доходность рискового актива
+k = p_u * u_list + p_d * d_list
+
+# Безрисковая доходность
+r = 1 + R_list
+
+print(f"\nОжидаемые доходности рискового актива (k): {k}")
+print(f"Безрисковые доходности (1+R): {r}")
+print(f"Премия за риск (k - r): {k - r}")
+
+# Волатильность случайной компоненты
+# σ_t = √(p(u-k)² + pᵈ(d-k)²)
+w_std = np.sqrt(p_u * (u_list - k)**2 + p_d * (d_list - k)**2)
+
+print(f"\nСтандартное отклонение случайной компоненты (σ_t): {w_std}")
+
+# ============================================================================
+# ПАРАМЕТРЫ ЧИСЛЕННОГО РЕШЕНИЯ
+# ============================================================================
+
+N_RUNS = 10                        # Количество прогонов для усреднения
+MAX_LEVERAGE = 2.5                 # Максимальная доля рискового актива
+N_MC = 5000                        # Количество симуляций Монте-Карло
+
+# Сетка для динамического программирования
+# V0 = 121.51, 
+z_min = 20.0
+z_max = 400.0
+num_z = 500
+z_grid = np.linspace(z_min, z_max, num_z)
+
+# Сетка для управления
+u_grid = np.linspace(0.0, MAX_LEVERAGE, 81)  # 81 точка от 0 до 2.5
+
+DISTRIBUTIONS = ['normal', 'laplace', 'uniform']
+
+print(f"\nПараметры численного решения:")
+print(f"  Начальный капитал (V₀): {V0} руб.")
+print(f"  Диапазон z_grid: [{z_min}, {z_max}]")
+print(f"  Максимальное плечо: {MAX_LEVERAGE}")
+print(f"  Количество симуляций: {N_MC}")
+
+# ============================================================================
+# ФУНКЦИИ ДЛЯ РАСПРЕДЕЛЕНИЙ
+# ============================================================================
+
+def get_params(dist_type, std_t):
+    """
+    Получение параметров распределения с одинаковым средним (0) и 
+    стандартным отклонением (std_t)
+    """
+    if dist_type == 'normal':
+        # Для нормального: σ = std_t
+        return {'loc': 0.0, 'scale': std_t}
+    
+    elif dist_type == 'laplace':
+        # Для Лапласа: Var = 2*scale² = std_t² → scale = std_t/√2
+        return {'loc': 0.0, 'scale': std_t / np.sqrt(2)}
+    
+    elif dist_type == 'uniform':
+        # Для равномерного: Var = (b-a)²/12 = std_t²
+        # a = -√3·std_t, b = √3·std_t
+        a = -np.sqrt(3) * std_t
+        b = np.sqrt(3) * std_t
+        return {'low': a, 'high': b}
+
+def generate_w(dist_type, params, size):
+    """Генерация случайных величин из заданного распределения"""
+    if dist_type == 'normal':
+        return np.random.normal(loc=params['loc'], scale=params['scale'], size=size)
+    elif dist_type == 'laplace':
+        return np.random.laplace(loc=params['loc'], scale=params['scale'], size=size)
+    elif dist_type == 'uniform':
+        return np.random.uniform(low=params['low'], high=params['high'], size=size)
+
+# ============================================================================
+# ИНИЦИАЛИЗАЦИЯ РЕЗУЛЬТАТОВ
+# ============================================================================
+
+avg_results = {dist: {
+    'V0_expected': 0.0,
+    'u_opt': np.zeros(T),
+    'V': [np.zeros(num_z) for _ in range(T+1)],
+    'policy': [np.zeros(num_z) for _ in range(T)]
+} for dist in DISTRIBUTIONS}
+
+all_results = {dist: [] for dist in DISTRIBUTIONS}
+
+# ============================================================================
+# ОСНОВНОЙ ЦИКЛ (N_RUNS прогонов)
+# ============================================================================
+
+for run in range(N_RUNS):
+    np.random.seed(run)
+    print(f"\n--- Прогон {run+1}/{N_RUNS} ---")
+    
+    for dist_type in DISTRIBUTIONS:
+        # Генерация случайных компонент для всех шагов
+        W = np.zeros((T, N_MC, len(u_grid)))
+        for t in range(T):
+            params = get_params(dist_type, w_std[t])
+            w_col = generate_w(dist_type, params, (N_MC, 1))
+            W[t] = np.tile(w_col, (1, len(u_grid)))
+        
+        # Инициализация функции ценности и политики
+        V = [np.zeros(num_z) for _ in range(T+1)]
+        policy = [np.zeros(num_z) for _ in range(T)]
+        
+        # Терминальное условие: V_T(z) = z
+        V[T] = z_grid.copy()
+        
+        u_arr = u_grid.reshape(1, -1)
+        
+        # Обратная индукция от T-1 до 0
+        for t in range(T-1, -1, -1):
+            rt = r[t]
+            kt = k[t]
+            V_next = V[t+1]
+            
+            for i, z in enumerate(z_grid):
+                # Эволюция капитала: z_{t+1} = z_t · (r_t + (k_t - r_t + w_t) · u_t)
+                excess_return = (kt - rt) + W[t]
+                z_next = z * (rt + excess_return * u_arr)
+                
+                # Ограничение: капитал не может быть отрицательным
+                z_next = np.maximum(z_next, 0.0)
+                
+                # Интерполяция функции ценности на следующем шаге
+                z_flat = z_next.ravel()
+                V_interp = np.interp(z_flat, z_grid, V_next, left=0.0, right=V_next[-1])
+                V_interp = V_interp.reshape(N_MC, len(u_grid))
+                
+                # Математическое ожидание
+                expected = np.mean(V_interp, axis=0)
+                
+                # Оптимальное управление: u_t* = argmax E[V_{t+1}(z_{t+1})]
+                best_idx = np.argmax(expected)
+                V[t][i] = expected[best_idx]
+                policy[t][i] = u_grid[best_idx]
+        
+        # Интерполяция для начального капитала V0
+        V0_exp = np.interp(V0, z_grid, V[0])
+        u_opt = np.array([np.interp(V0, z_grid, policy[t]) for t in range(T)])
+        
+        # Накопление результатов для усреднения
+        avg_results[dist_type]['V0_expected'] += V0_exp / N_RUNS
+        avg_results[dist_type]['u_opt'] += u_opt / N_RUNS
+        
+        for t_idx in range(T+1):
+            avg_results[dist_type]['V'][t_idx] += V[t_idx] / N_RUNS
+        for t_idx in range(T):
+            avg_results[dist_type]['policy'][t_idx] += policy[t_idx] / N_RUNS
+        
+        all_results[dist_type].append({
+            'V0_expected': V0_exp,
+            'u_opt': u_opt,
+            'V': V,
+            'policy': policy
+        })
+        
+        print(f"  {dist_type}: V₀_ожид = {V0_exp:.2f}, u_opt = {u_opt}")
+
+# ============================================================================
+# ВЫВОД РЕЗУЛЬТАТОВ
+# ============================================================================
+
+print("\n" + "=" * 80)
+print("УСРЕДНЁННЫЕ РЕЗУЛЬТАТЫ (по {} прогонам)".format(N_RUNS))
+print("=" * 80)
+
+print(f"\n{'Распределение':<12} {'Ожидаемый доход':<15} {'u_0':<10} {'u_1':<10} {'u_2':<10}")
+print("-" * 65)
+
+for dist_type in DISTRIBUTIONS:
+    res = avg_results[dist_type]
+    print(f"{dist_type:<12} {res['V0_expected']:<15.2f} {res['u_opt'][0]:<10.4f} {res['u_opt'][1]:<10.4f} {res['u_opt'][2]:<10.4f}")
+
+
+
+print("\n" + "=" * 80)
+print("ТАБЛИЦА 1. Усреднённые результаты динамического программирования")
+print("=" * 80)
+
+print(f"\n{'Распределение':<15} | {'Ожидаемый доход':<18} | {'u_0':<10} | {'u_1':<10} | {'u_2':<10}")
+print("-" * 75)
+
+for dist_type in DISTRIBUTIONS:
+    res = avg_results[dist_type]
+    if dist_type == 'normal':
+        name = "Нормальное"
+    elif dist_type == 'laplace':
+        name = "Лапласа"
+    else:
+        name = "Равномерное"
+    
+    print(f"{name:<15} | {res['V0_expected']:<18.2f} | {res['u_opt'][0]:<10.4f} | {res['u_opt'][1]:<10.4f} | {res['u_opt'][2]:<10.4f}")
+
+# ============================================================================
+# ГРАФИК 1: Оптимальная стратегия
+# ============================================================================
+
+plt.figure(figsize=(10, 6))
+linestyles = ['s-', 'o--', '^-']
+markers = ['s', 'o', '^']
+
+for i, dist_type in enumerate(DISTRIBUTIONS):
+    u_vals = avg_results[dist_type]['u_opt']
+    plt.plot(range(T), u_vals, linestyles[i], lw=2, markersize=8, 
+             label=f'{dist_type.capitalize()}', marker=markers[i])
+
+plt.xlabel('Период, t', fontsize=12)
+plt.ylabel('Оптимальная доля акций, u_t', fontsize=12)
+plt.title(f'Средняя оптимальная стратегия (V₀={V0:.2f} руб.)', fontsize=14, fontweight='bold')
+plt.xticks(range(T))
+plt.legend(fontsize=11)
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# ============================================================================
+# ГРАФИК 2: Плотности распределений
+# ============================================================================
+
+plt.figure(figsize=(10, 6))
+x_plot = np.linspace(-1, 1, 1000)
+std0 = w_std[0]
+
+pdf_funcs = {
+    'normal': lambda x, p: stats.norm.pdf(x, loc=p['loc'], scale=p['scale']),
+    'laplace': lambda x, p: stats.laplace.pdf(x, loc=p['loc'], scale=p['scale']),
+    'uniform': lambda x, p: stats.uniform.pdf(x, loc=p['low'], scale=p['high'] - p['low'])
+}
+
+line_styles = ['-', '--', '-.']
+
+for i, dist_type in enumerate(DISTRIBUTIONS):
+    params = get_params(dist_type, std0)
+    pdf = pdf_funcs[dist_type](x_plot, params)
+    plt.plot(x_plot, pdf, line_styles[i], lw=2, label=dist_type.capitalize())
+
+plt.xlabel('Значение случайной компоненты w', fontsize=12)
+plt.ylabel('Плотность распределения', fontsize=12)
+plt.title('Сравнение законов распределения', fontsize=14, fontweight='bold')
+plt.legend(fontsize=11)
+plt.grid(True, alpha=0.3)
+plt.xlim(-0.7, 0.7)
+plt.tight_layout()
+plt.show()
+
+# ============================================================================
+# ДОПОЛНИТЕЛЬНЫЙ АНАЛИЗ
+# ============================================================================
+
+print("\n" + "=" * 80)
+print("ДОПОЛНИТЕЛЬНЫЙ АНАЛИЗ")
+print("=" * 80)
+
+print(f"\nПараметры распределений для t=0 (σ₀ = {w_std[0]:.4f}):")
+for dist_type in DISTRIBUTIONS:
+    params = get_params(dist_type, w_std[0])
+    if dist_type == 'normal':
+        print(f"  {dist_type}: loc={params['loc']}, scale={params['scale']:.4f}")
+    elif dist_type == 'laplace':
+        print(f"  {dist_type}: loc={params['loc']}, scale={params['scale']:.4f}")
+    else:
+        print(f"  {dist_type}: low={params['low']:.4f}, high={params['high']:.4f}")
+
+print(f"\nПремия за риск (k - r) по годам:")
+for t in range(T):
+    print(f"  Год {t+1}: {k[t] - r[t]:.4f}")
+
+print(f"\nИнтерпретация результатов:")
+print(f"  - u_0: доля рискового актива на начальном шаге")
+print(f"  - u_1, u_2: доли на последующих шагах")
+print(f"  - Ожидаемый доход: E[V_T] при оптимальном управлении")
+print(f"  - V₀ = {V0:.2f} руб. - начальная цена опциона из биномиальной модели")
